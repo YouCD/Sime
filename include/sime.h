@@ -58,6 +58,11 @@ public:
     const std::string& VocabSignature() const { return vocab_sig_; }
     void LearnUserSentence(const std::vector<TokenID>& context,
                            const std::vector<TokenID>& sentence);
+    // Inject an imported unigram frequency seed (e.g. from a Rime
+    // userdb) for a known token id. Adds unigram mass only — no bigram
+    // is fabricated. No-op when the engine is not ready or id is
+    // NotToken. Persisted via SaveUserSentence's SEED section.
+    void SeedUserUnigram(TokenID id, std::uint32_t count);
     // UTF-8 text for a single token id, sourced from the dict's
     // mmap'd token table. Empty for NotToken or out-of-range ids.
     std::string TokenText(TokenID id) const;

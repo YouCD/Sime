@@ -65,6 +65,17 @@ if(SIME_BUILD_TOOLS)
     add_executable(sime-cut ${NEW_ROOT}/bin/cutter.cc)
     target_link_libraries(sime-cut PRIVATE sime_core)
 
+    add_executable(sime-import ${NEW_ROOT}/bin/sime-import.cc)
+    target_link_libraries(sime-import PRIVATE sime_core)
+    find_path(LEVELDB_INCLUDE_DIR leveldb/db.h)
+    find_library(LEVELDB_LIBRARY NAMES leveldb)
+    if(LEVELDB_INCLUDE_DIR AND LEVELDB_LIBRARY)
+        target_include_directories(sime-import PRIVATE ${LEVELDB_INCLUDE_DIR})
+        target_link_libraries(sime-import PRIVATE ${LEVELDB_LIBRARY})
+    else()
+        message(FATAL_ERROR "sime-import requires libleveldb (leveldb/db.h + leveldb lib)")
+    endif()
+
     add_executable(sime-compact ${NEW_ROOT}/bin/compact.cc)
     target_link_libraries(sime-compact PRIVATE sime_core)
 
@@ -75,6 +86,7 @@ if(SIME_BUILD_TOOLS)
         sime-dump
         sime-compact
         #sime-cut
+        sime-import
         sime
     )
 

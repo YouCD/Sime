@@ -12,6 +12,7 @@ namespace {
 struct Options {
     std::filesystem::path dict;
     std::filesystem::path cnt;
+    std::filesystem::path user;  // optional user-sentence file to load
     std::size_t n = 5;
     std::size_t extra = 0;  // extra Layer 1 sentences for DecodeNumSentence
     bool sentence = false;
@@ -28,6 +29,7 @@ void PrintUsage() {
               << "\nOptions:\n"
               << "  --dict, -d <path>   Sime dict\n"
               << "  --cnt,  -c <path>   Sime LM model\n"
+              << "  --user <path>       Load user-sentence history (enables learning)\n"
               << "  -n <N>              Max results to display (default 5)\n"
               << "  -e <N>              Extra Layer 1 sentences for --num -s\n"
               << "                      (top sentence always returned; default 0)\n"
@@ -47,6 +49,8 @@ bool ParseArgs(int argc, char** argv, Options& opts) {
             opts.dict = argv[++i];
         } else if ((arg == "--cnt" || arg == "-c") && i + 1 < argc) {
             opts.cnt = argv[++i];
+        } else if (arg == "--user" && i + 1 < argc) {
+            opts.user = argv[++i];
         } else if (arg == "-n" && i + 1 < argc) {
             opts.n = static_cast<std::size_t>(std::stoul(argv[++i]));
         } else if (arg == "-e" && i + 1 < argc) {
@@ -137,6 +141,15 @@ int main(int argc, char** argv) {
     }
     std::cout << "Dict: " << opts.dict << "\n"
               << "Model: " << opts.cnt << "\n";
+
+    if (!opts.user.empty()) {
+        engine.SetUserSentenceEnabled(true);
+        if (engine.LoadUserSentence(opts.user)) {
+            std::cout << "User: " << opts.user << " (loaded)\n";
+        } else {
+            std::cout << "User: " << opts.user << " (load failed)\n";
+        }
+    }
 
     if (opts.next || opts.next_en) {
         std::cout << "Mode: next (prediction"

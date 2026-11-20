@@ -23,6 +23,10 @@ public:
     // One candidate pick: the token IDs the decoder produced.
     struct Selection {
         Sentence tokens;
+        // Wall-clock epoch seconds when this pick happened; drives the
+        // exponential recency decay of the unigram tail. 0 = unknown
+        // (legacy files), treated as "now" on load.
+        std::uint32_t tick = 0;
     };
 
     // One paragraph = a sequence of consecutive selections that share
@@ -76,9 +80,23 @@ public:
     // is appended to that paragraph; otherwise a new paragraph starts.
     void Add(const Sentence& context, const Sentence& tokens);
 
+    // Imported unigram frequency seeds (e.g. from a Rime userdb). These
+    // are pure word frequencies with no bigram/context information, so
+    // they contribute only to the unigram tail of CostAdjustment and
+    // never fabricate bigram counts. Persisted in a dedicated SEED
+    // section, independent of the paragraph history.
+    // `tick` is the seed's wall-clock epoch seconds (decay start); 0 =
+    // now. Seeds decay from import time, not from unreliable Rime ticks.
+    void SeedUnigram(TokenID token, std::uint32_t count,
+                     std::uint32_t tick = 0);
+    std::uint32_t SeedCount(TokenID token) const;
+
+    // Effective unigram count = paragraph picks + imported seed.
     std::uint32_t UnigramCount(TokenID token) const;
     std::uint32_t BigramCount(TokenID prev, TokenID cur) const;
-    std::uint32_t TotalUnigramCount() const { return total_unigram_count_; }
+    std::uint32_t TotalUnigramCount() const {
+        return total_unigram_count_ + seed_total_;
+    }
     // N1+(prev, *) — number of distinct successor tokens after `prev`.
     // Used by Ney's absolute-discounting backoff weight (γ).
     std::uint32_t DistinctSuccessors(TokenID prev) const;
@@ -97,6 +115,25 @@ private:
     static Sentence Flatten(const Entry& entry);
     static bool EndsWith(const Sentence& sentence, const Sentence& suffix);
 
+    // Paragraph-only unigram count (excludes imported seeds). Used as
+    // the bigram denominator so seed mass never distorts observed
+    // transition probabilities.
+    std::uint32_t ParagraphCount(TokenID token) const;
+
+    // Exponential recency decay of the unigram tail (Rime-style). All
+    // weights decay at the same rate, so mere time passing never
+    // reorders words; only fresh picks lift recent words over stale
+    // ones. Bigram math is untouched (uses raw paragraph counts).
+    static double DecayFactor(std::uint32_t from, std::uint32_t to);
+    // Fold `delta` fresh weight for `token` into the decayed totals,
+    // refreshing both the token's and the global timestamp to `now`.
+    void TouchDecay(TokenID token, double delta, std::uint32_t now);
+    // Apply a whole paragraph's decayed contribution (delta = ±1) at
+    // `now`. Used by the runtime add/evict paths; Rebuild reconstructs
+    // decay directly at a common reference time instead.
+    void AdjustEntryDecay(const Entry& entry, int delta, std::uint32_t now);
+    static std::uint32_t Now();
+
     void StartParagraph(Selection selection);
     void AppendToLatest(Selection selection);
     void AdjustEntryCounts(const Entry& entry, int delta);
@@ -113,6 +150,22 @@ private:
     // incrementally when bigram counts cross the 0 boundary.
     std::unordered_map<TokenID, std::uint32_t> distinct_successors_;
     std::uint32_t total_unigram_count_ = 0;
+    // Imported unigram seeds (Rime userdb etc.), kept separate from
+    // paragraph-derived counts so they add unigram mass without
+    // fabricating bigrams.
+    std::unordered_map<TokenID, std::uint32_t> seed_unigram_;
+    std::uint32_t seed_total_ = 0;
+    // Per-token seed timestamp (decay start). Seeds aggregate by token;
+    // the stored tick is the most recent contribution's, which for a
+    // bulk import is the shared import time.
+    std::unordered_map<TokenID, std::uint32_t> seed_tick_;
+    // Decayed unigram weights (paragraph picks + seeds), each paired
+    // with the wall-clock second it was last refreshed. decay_total_ /
+    // decay_total_t_ track the global mass for normalization.
+    std::unordered_map<TokenID, double> decay_w_;
+    std::unordered_map<TokenID, std::uint32_t> decay_t_;
+    double decay_total_ = 0;
+    std::uint32_t decay_total_t_ = 0;
 };
 
 } // namespace sime

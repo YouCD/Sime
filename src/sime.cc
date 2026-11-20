@@ -210,6 +210,13 @@ void Sime::LearnUserSentence(const std::vector<TokenID>& context,
     user_sentence_.Add(context, sentence);
 }
 
+void Sime::SeedUserUnigram(TokenID id, std::uint32_t count) {
+    if (!ready_ || id == NotToken) {
+        return;
+    }
+    user_sentence_.SeedUnigram(id, count);
+}
+
 std::string Sime::TokenText(TokenID id) const {
     if (id == NotToken || !ready_) {
         return {};
