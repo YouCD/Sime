@@ -2,6 +2,7 @@
 
 #include "cut.h"
 #include "gru_reranker.h"
+#include "pinyin_correct.h"
 #include "ustr.h"
 
 #include <algorithm>
@@ -19,8 +20,52 @@ namespace sime {
 namespace {
 
 constexpr std::size_t kGruCandidates = 10;
-constexpr float_t kGruPinyinScale = 0.60;
-constexpr float_t kGruT9Scale = 0.72;
+constexpr float_t kGruPinyinScale = 0.40;
+constexpr float_t kGruT9Scale = 0.50;
+
+// Curated common short English commands / tech words (≤4 letters). A
+// full-cover English exact match of one of these is confident developer
+// intent, so it gets EnglishWhitelistPenalty instead of the heavy
+// short-English penalty. Sorted for binary_search. Deliberately excludes
+// valid pinyin syllables (ping / lan / wan / man / long / su / du) and
+// protected 2-letter coincidences (nm / us / be / up / key) so CN 简拼
+// and full-pinyin paths are not displaced.
+constexpr std::string_view kCommonEnglish[] = {
+    "adb", "ant", "api", "apt", "ar", "as", "awk", "aws",
+    "bash", "bc", "bios", "brew", "buck",
+    "cat", "cc", "cd", "cli", "code", "cors", "cpu", "cron", "csrf",
+    "css", "curl",
+    "dd", "ddos", "deb", "df", "dhcp", "diff", "dns", "dom", "dpkg",
+    "echo", "ed", "env", "etcd", "ex",
+    "find", "fish", "fsck", "ftp",
+    "gcc", "gdb", "ghc", "git", "go", "grep", "grub", "gui", "gzip",
+    "halt", "hdmi", "head", "helm", "html", "htop", "http",
+    "ide", "init", "ipv4", "ipv6",
+    "java", "jq", "json", "jwt",
+    "kill", "ksh", "kvm",
+    "less", "lldb", "llvm", "ln", "ls", "lsof", "lua", "lxc", "lxd",
+    "make", "mkfs", "mvc", "mvvm",
+    "nat", "nice", "nl", "node", "npm", "nvme",
+    "od", "oop",
+    "pci", "pcie", "perf", "perl", "pip", "psql", "pwa",
+    "qemu",
+    "raid", "ram", "rar", "rest", "rpc", "rpm", "ruby", "rust",
+    "sata", "sbt", "scp", "sd", "sed", "seq", "sh", "snap", "sort",
+    "spa", "sql", "ssd", "ssh", "sudo", "svn",
+    "tail", "tar", "tcp", "tmux", "top", "tr", "tree",
+    "udp", "uefi", "uniq", "uri", "url", "usb",
+    "venv", "vga", "vim", "vpn",
+    "wc", "wget", "who", "wifi",
+    "xfs", "xss",
+    "yaml", "yarn", "yum",
+    "zip", "zsh", "zstd",
+};
+
+bool IsCommonEnglishWord(std::string_view word) {
+    constexpr std::size_t n =
+        sizeof(kCommonEnglish) / sizeof(kCommonEnglish[0]);
+    return std::binary_search(kCommonEnglish, kCommonEnglish + n, word);
+}
 
 void RerankWithGru(std::vector<DecodeResult>& candidates,
                    const GruReranker* reranker,
@@ -183,17 +228,21 @@ std::string Sime::TokenText(TokenID id) const {
 
 void Sime::ComputeEdgePenalties(std::vector<Node>& net,
                                 std::string_view input) {
-    // English penalty: only "long input + full coverage" English gets
-    // the lighter EnglishPenalty (e.g. google on 466453, hello on
-    // input "hello"). Everything else (partial-coverage like zg in
-    // zgkxjsdx, zgkxjs in zgkxjsdx, or short input full-cover like up
-    // / nm / key) gets EnglishPenaltyShort — these are likely
-    // coincidental English spellings of CN abbreviations.
+    // English penalty tiers for full-cover English edges:
+    //   1. curated common short command (≤4, kCommonEnglish) →
+    //      EnglishWhitelistPenalty (bonus): confident dev intent, must
+    //      beat CN 简拼 / 同音 rivals (awk→爱玩客, bash→巴士, code→从的).
+    //   2. length > 3 (google / hello / grep) → EnglishPenalty (light).
+    //   3. everything else (partial-cover zg in zgkxjsdx, or ≤3
+    //      full-cover up / nm / key / men) → EnglishPenaltyShort (heavy):
+    //      likely coincidental English spellings of CN abbreviations or
+    //      pinyin syllables.
     // Expansion penalty: short input gets ExpansionPenaltyShort (lets
     // 87→他说 beat short English exact); long input keeps stricter
     // ExpansionPenalty so abbrev edges don't crowd out the natural
     // full-pinyin path.
     const bool short_input = input.size() <= 4;
+    const bool short_english = input.size() <= 3;
     const float_t expansion_penalty = short_input
         ? ExpansionPenaltyShort : ExpansionPenalty;
     for (auto& col : net) {
@@ -203,11 +252,17 @@ void Sime::ComputeEdgePenalties(std::vector<Node>& net,
             if (edge.english) {
                 bool full_cover =
                     edge.start == 0 && edge.end == input.size();
-                en_pen = (full_cover && !short_input)
-                    ? EnglishPenalty : EnglishPenaltyShort;
+                if (full_cover && input.size() <= 4
+                    && IsCommonEnglishWord(input)) {
+                    en_pen = EnglishWhitelistPenalty;
+                } else {
+                    en_pen = (full_cover && !short_english)
+                        ? EnglishPenalty : EnglishPenaltyShort;
+                }
             }
             edge.penalty = en_pen
-                + (edge.expansion ? expansion_penalty : 0.0f);
+                + (edge.expansion ? expansion_penalty : 0.0f)
+                + edge.correction;
         }
     }
 }
@@ -1011,6 +1066,123 @@ void Sime::InitNet(std::string_view input,
                     }
                 }
             }
+        }
+    }
+
+    // Additive word-level pinyin correction. The LM is word-based, so a
+    // corrected syllable must be looked up as part of a whole word key
+    // (e.g. zongguo -> zhong'guo -> 中国) to inherit the word's LM score;
+    // chaining corrected single chars scores far worse. A bounded DFS
+    // enumerates corrected syllable sequences (<=3 syllables) over the
+    // ORIGINAL input span, joins them with '\'' and looks up the word DAT.
+    // Fuzzy pronunciation variants fire on valid syllables, typo
+    // (edit-distance-1) variants on invalid ones. Every emitted edge carries
+    // a correction cost; the exact path (correction=0) is never displaced, so
+    // correct input does not regress. Spans cross greedy seg boundaries so a
+    // typo like "jei" (split j+ei by the walk) is still recovered as jie.
+    if (kEnableFuzzyCorrection || kEnableTypoCorrection) {
+        const auto& py_dat = dict_.Dat(Dict::LetterPinyin);
+        struct SylCands {
+            bool known = false;
+            std::vector<std::string> variants;
+        };
+        std::unordered_map<std::size_t, SylCands> ccache;
+        auto cands_at = [&](std::size_t pos, std::size_t len) -> const SylCands& {
+            const std::size_t key = pos * 8 + len;
+            auto it = ccache.find(key);
+            if (it != ccache.end()) return it->second;
+            SylCands sc;
+            std::string seg(input.substr(pos, len));
+            sc.known = Dict::IsKnownPinyin(seg);
+            if (len >= 2) {
+                if (sc.known) {
+                    if (kEnableFuzzyCorrection)
+                        sc.variants = pinyin_correct::FuzzyVariants(seg);
+                } else if (kEnableTypoCorrection
+                           && !Dict::IsExtendablePinyin(seg)) {
+                    // Extendable invalid prefixes (zho -> zhou) are already
+                    // covered by abbreviation/expansion; only genuinely
+                    // dead-end segments need typo correction.
+                    sc.variants = pinyin_correct::TypoVariants(seg);
+                }
+            }
+            return ccache.emplace(key, std::move(sc)).first->second;
+        };
+
+        constexpr int kMaxSyl = 3;
+        constexpr int kLookupBudget = 64;
+        std::vector<std::string> parts;
+        parts.reserve(kMaxSyl);
+
+        auto dfs = [&](auto&& self, std::size_t span_start, std::size_t pos,
+                       int nsyl, int ncorrected, float_t cost,
+                       int& budget) -> void {
+            // Skip fuzzy-only single-syllable corrections: a valid syllable
+            // already has its exact homophones, so re-emitting them as
+            // corrected edges only bloats the beam. Keep typo single-syllable
+            // recovery (invalid input) and all multi-syllable word edges.
+            const bool emit_here = nsyl >= 1 && ncorrected >= 1 && budget > 0
+                && (nsyl >= 2 || cost >= TypoCorrectionPenalty);
+            if (emit_here) {
+                std::string key;
+                for (int i = 0; i < nsyl; ++i) {
+                    if (i) key.push_back('\'');
+                    key += parts[static_cast<std::size_t>(i)];
+                }
+                uint32_t val = 0;
+                --budget;
+                if (py_dat.Get(key, val)) {
+                    auto entry = dict_.GetEntry(Dict::LetterPinyin, val);
+                    for (uint32_t i = 0; i < entry.count; ++i) {
+                        net[span_start].es.push_back(
+                            {span_start, pos, entry.items[i].id,
+                             entry.items[i].pieces, 0, false, false, cost});
+                    }
+                }
+            }
+            if (nsyl >= kMaxSyl || budget <= 0) return;
+            // A correction must occur within the first two syllables; stop
+            // walking purely-original prefixes so valid input stays cheap.
+            if (ncorrected == 0 && nsyl >= 2) return;
+            for (std::size_t len = 1; len <= 6 && pos + len <= total; ++len) {
+                if (input[pos + len - 1] == '\'') break;
+                const SylCands& sc = cands_at(pos, len);
+                if (sc.known) {
+                    // Keep the original syllable (uncorrected) so a word with
+                    // a single corrected syllable can still be formed.
+                    parts.push_back(std::string(input.substr(pos, len)));
+                    self(self, span_start, pos + len, nsyl + 1, ncorrected,
+                         cost, budget);
+                    parts.pop_back();
+                    for (const auto& v : sc.variants) {
+                        parts.push_back(v);
+                        self(self, span_start, pos + len, nsyl + 1,
+                             ncorrected + 1, cost + FuzzyPinyinPenalty, budget);
+                        parts.pop_back();
+                        if (budget <= 0) return;
+                    }
+                } else {
+                    for (const auto& v : sc.variants) {
+                        parts.push_back(v);
+                        self(self, span_start, pos + len, nsyl + 1,
+                             ncorrected + 1, cost + TypoCorrectionPenalty, budget);
+                        parts.pop_back();
+                        if (budget <= 0) return;
+                    }
+                }
+                if (budget <= 0) return;
+            }
+        };
+
+        // Words begin at syllable boundaries, so only launch the correction
+        // DFS from the greedy seg boundaries (≈1/3 of all character positions).
+        // Span lengths inside the DFS are still enumerated freely, so a typo
+        // that the greedy walk split (jei -> j+ei) is recovered from an earlier
+        // boundary. This keeps the typo pass cheap on long valid sentences.
+        for (std::size_t s : seg_bounds) {
+            if (s >= total || input[s] == '\'') continue;
+            int budget = kLookupBudget;
+            dfs(dfs, s, s, 0, 0, 0.0f, budget);
         }
     }
 

@@ -172,6 +172,19 @@ bool Dict::IsKnownPinyin(const std::string& text) {
     return false;
 }
 
+const std::unordered_set<std::string>& Dict::PinyinSyllableSet() {
+    static const std::unordered_set<std::string> set = []() {
+        std::unordered_set<std::string> s;
+        constexpr uint32_t FinalMask = 0xFFF;
+        for (std::size_t i = 0; i < PinyinDictSize; ++i) {
+            if ((PinyinDict[i].value & FinalMask) != 0)
+                s.insert(PinyinDict[i].text);
+        }
+        return s;
+    }();
+    return set;
+}
+
 bool Dict::IsExtendablePinyin(const std::string& text) {
     if (text.empty()) return true;
     constexpr uint32_t FinalMask = 0xFFF;

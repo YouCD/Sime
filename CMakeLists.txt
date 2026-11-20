@@ -23,6 +23,7 @@ add_library(sime_core
     ${NEW_SRC_DIR}/trie.cc
     ${NEW_SRC_DIR}/cut.cc
     ${NEW_SRC_DIR}/gru_reranker.cc
+    ${NEW_SRC_DIR}/pinyin_correct.cc
 )
 
 target_include_directories(sime_core PUBLIC ${NEW_INC_DIR} ${NEW_SRC_DIR})

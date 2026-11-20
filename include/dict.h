@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 #include <vector>
 
 namespace sime {
@@ -53,6 +54,10 @@ public:
 
     // Static pinyin utilities (backed by dict.inc)
     static bool IsKnownPinyin(const std::string& text);
+    // O(1) membership test against all terminal pinyin syllables. Used by the
+    // typo-correction candidate generator, which validates hundreds of
+    // candidates per segment and would otherwise pay a binary search each.
+    static const std::unordered_set<std::string>& PinyinSyllableSet();
     // True iff some longer pinyin final has `text` as a strict prefix
     // (e.g. "xu" → true since "xue"/"xun"/"xuan" exist; "xue" → false).
     static bool IsExtendablePinyin(const std::string& text);

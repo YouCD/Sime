@@ -119,6 +119,7 @@ private:
         float_t penalty = 0;           // syllable mismatch penalty
         bool expansion = false;        // tail-expansion edge (lower priority in PruneNode)
         bool english = false;          // edge from English DAT (lower priority than full pinyin)
+        float_t correction = 0;        // fuzzy-pinyin / typo correction cost (0 = exact path)
     };
 
     struct Node {
@@ -144,12 +145,29 @@ private:
     // higher in beam search and Layer 2, while common English words
     // (iphone, hello) still surface when there's no strong Chinese rival.
     static constexpr float_t EnglishPenalty = 2.5;
-    // Short-input English penalty: short inputs (≤4 letters/digits) where
-    // an English exact word coincidentally spell-matches the input
-    // (e.g. "nm" / "us" / "be") need a stronger nudge so CN 简拼
+    // Short-input English penalty: very short inputs (≤3 letters/digits)
+    // where an English exact word coincidentally spell-matches the input
+    // (e.g. "nm" / "us" / "be" / "men") need a stronger nudge so CN 简拼
     // candidates can win — the LM's <eos>|english=0 transition gives
-    // English an unfair tail-cost edge in beam scoring otherwise.
+    // English an unfair tail-cost edge in beam scoring otherwise. Length
+    // 4+ full-cover English (grep / bash / code) uses EnglishPenalty.
     static constexpr float_t EnglishPenaltyShort = 8.0;
+    // Bonus (negative penalty) for full-cover English edges whose text is
+    // a curated common short command / tech word (≤4 letters, e.g. awk /
+    // sed / ssh / tar / bash / code). These are confident English intent
+    // for a developer, so they must beat CN 简拼 / 同音 rivals (爱玩客 /
+    // 色调 / 上市 / 他人 / 巴士 / 从的) whose LM frequency is much higher.
+    // Scoped to ≤4 letters so longer English keeps EnglishPenalty.
+    static constexpr float_t EnglishWhitelistPenalty = -3.0;
+    // Pinyin correction (additive edges; exact path untouched). Fuzzy
+    // pronunciation (zh/z, n/l, ang/an ...) costs less than a keyboard typo
+    // (edit distance 1) because it is a systematic, higher-confidence
+    // reinterpretation. Both sit above EnglishPenalty so a correct exact
+    // pinyin match always outranks a corrected rival.
+    static constexpr float_t FuzzyPinyinPenalty = 5.0;
+    static constexpr float_t TypoCorrectionPenalty = 7.0;
+    static constexpr bool kEnableFuzzyCorrection = true;
+    static constexpr bool kEnableTypoCorrection = true;
 
     // Lattice building
     void InitNet(std::string_view input,
