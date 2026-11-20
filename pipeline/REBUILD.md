@@ -946,3 +946,161 @@ ssh ycd@HOST 'sudo cp -a /usr/lib/fcitx5/libsime.so /usr/lib/fcitx5/libsime.so.b
 
 回滚：还原 `.bak-pre-correction` 并重启 fcitx5。纠错亦可用编译期开关
 `kEnableFuzzyCorrection/kEnableTypoCorrection=false` 单独关闭（重编即回退）。
+
+---
+
+## 11. 用户历史学习：Rime 词频种子导入 + 时间衰减（2026-11-21 追加）
+
+两项**引擎代码**改动（不动词表/模型/GRU），让 Sime 具备 Rime 式的用户自学习：
+先把 Rime 历史词频导入成 unigram 种子（方案 A，V5），再补上 Rime 的 `t/tick`
+时间衰减（V6）。**截至本节这两项均未提交**（工作树改动，按约定未经要求不提交）。
+涉及文件：`include/user.h`、`src/user.cc`（核心）、`include/sime.h`/`src/sime.cc`
+（`SeedUserUnigram` 透传）、`bin/sime-import.cc`（新增导入工具）、`bin/sime.cc`
+（`--user` 加载历史）、`CMakeLists.txt`（sime-import 目标 + leveldb 依赖）。
+
+### 11.1 方案 A：Rime 词频 → unigram 种子（V5）
+
+**动机**：Sime 原本无自学习（§5.1 口径里"表中即日常水平"）。Rime userdb 积累了
+用户真实词频，导过来即可让常用词压过同音竞争词。
+
+**Rime userdb 结构**：LevelDB 目录，key=`拼音\t文本`，value=`c=<commits> d=<depth> t=<tick>`。
+是**纯 unigram 自频**（无 bigram/上下文）；`t` 是逻辑时钟、跨机不一致，不可靠。
+
+**种子机制**（`UserSentence`，与段落历史分离）：
+- 新增 `seed_unigram_`(map<TokenID,u32>) + `seed_total_`，独立 SEED 段持久化。
+- `UnigramCount = 段落计数 + 种子`；`ParagraphCount = 仅段落`（**bigram 分母用它**，
+  种子质量绝不污染转移概率）；`TotalUnigramCount = total_unigram_count_ + seed_total_`。
+- `SeedUnigram(token,count)` 只加 unigram 质量，**不伪造 bigram**。
+- `CostAdjustment` 仍是 libime 式概率空间线性混合（weight 0.2），max-floor 于 LM
+  分（只会改善、不会变差）；无种子/无历史 → 返回 0（零回归）。
+
+**导入工具 `bin/sime-import.cc`**（直接吃原始数据，无需先导出 TSV）：
+```bash
+# 原始 Rime userdb（LevelDB 目录，--rime 可重复，多库累加）
+sime-import --rime ~/…/rime_ice.userdb --rime ~/…/luna_pinyin.userdb
+# 或 TSV 导出（pinyin\ttext\tcommits\ttick）
+sime-import --in export.tsv
+```
+- 每条文本用 Sime `Cutter.Cut` 切词，**仅当恰好切成 1 个已知词级 token**
+  （`cuts.size()==1 && !is_unk`）才把 commits 计为种子；多词/OOV 跳过。
+- `--dict/--cnt` 缺省按 `ResolveModelDir` 解析：`/usr/share/sime` →
+  可执行文件同级 `../pipeline/output-new` → `cwd/pipeline/output-new`。
+- `--out` 缺省按 `ResolveOutPath`：`$XDG_DATA_HOME/fcitx5/sime/sentences.txt` →
+  `$HOME/.local/share/fcitx5/sime/sentences.txt`（与 fcitx5 插件 `userSentencePath()` 一致）。
+- `--out` 已存在则先 `LoadUserSentence` 合并（词表不符自动迁移），种子叠加而非覆盖。
+- 依赖 leveldb（`find_path/find_library`，本机与 126 均有 `/usr/lib/libleveldb.so.1`）。
+
+**跨词表迁移**（关键）：`vocab_sig = dict_size:lm_size:lm_mtime_secs`
+（`MakeVocabSignature`，sime.cc）。两台机器模型不同 → sig 不同 → `LoadUserSentence`
+触发 `LoadAndMigrate`：忽略旧 token ID，把每段 **TEXT 注释列**拼回连续串，用本机
+`Cutter.Cut` 重切，按本机词表重新落 ID。故导入文件必须带文本注释列（Save 时
+`token_text` 回调发射 tab 对齐注释）。实测 188 模型 162M/135M ≠ 本机 154M/50M，
+迁移后本机 ID（代码 66393 / 模型 211671 / 关闭 114911）正确落地。
+
+**V5 格式**：头 `SIME_USER_SENTENCE_V5` + `VOCAB <sig>` + 段落（空行分段，每行
+`<ids…>[\t<text>]`）+ `SEED` 段（`<id> <count>[\t<text>]`，按 id 排序）。
+
+实测 boost（本机 output-new）：模型 moxing −10.34→−6.73；代码 daima 跌出 top3→首位
+−6.87；关闭 guanbi→首位 −6.79。无种子用户零回归。
+
+### 11.2 时间衰减（V6，Rime t/tick 移植）
+
+**动机**：V5 计数无时间维度——很久以前打过一次的词 count=1 会一直保留（直到
+8192 段落上限挤掉），和昨天刚打的词同权。Rime 用 per-word 衰减权重让"最近常用"
+压过"陈旧一次性"。
+
+**衰减模型**：per-token 指数衰减 unigram 权重，墙钟秒，**半衰期 30 天**。
+- `DecayFactor(from,to)=exp(-(to-from)*kDecayLambda)`，`kDecayLambda=ln2/(30*86400)`；
+  `to<from`（时钟回拨）时 elapsed 钳 0，不放大权重。
+- **只衰减 unigram 尾部**；bigram 的 alpha/gamma 仍用原始 `ParagraphCount`/`BigramCount`，
+  不污染转移概率。
+- 归一化 `pr_unigram = decayed(cur)/decayed_total`。所有权重同速率衰减 → 纯时间
+  流逝不改相对排序；**只有新选词**（新鲜 +1、旧权重已衰减）才抬升近期词。
+- **种子衰减起点 = 导入时刻**（Rime `t` 不可靠）。刚导入所有种子同龄 → 相对排序
+  与 V5 一致（无即时回归），之后随用户新选词逐渐体现近期偏好。
+
+**数据结构**（`include/user.h`）：
+- `Selection` 增 `std::uint32_t tick=0`（墙钟秒，0=未知→load 视为 now）；`Add` 设 `sel.tick=Now()`。
+- 新成员 `decay_w_`(map<TokenID,double>)、`decay_t_`(map<TokenID,u32>)、
+  `decay_total_`(double)、`decay_total_t_`(u32)；**`seed_tick_`(map<TokenID,u32>)**
+  保存种子时间戳供 Rebuild 重建。
+- helper：`Now()`、`DecayFactor`、`TouchDecay(token,delta,now)`（O(1) 增量，刷新
+  total 与 token 到 now）、`AdjustEntryDecay(entry,±1,now)`。
+
+**坑 14（关键设计修正）**：原想"Rebuild 经 AdjustEntryCounts+TouchDecay 重建衰减"
+**不可行**——load 回放任意历史 tick，而 `TouchDecay` 的全局刷新假设时间单调递增，
+遇到更旧的时间戳会把 `decay_total_` 往回衰减、破坏归一化。最终拆成两条路径：
+- `AdjustEntryCounts` 只管原始 unigram/bigram（不动）。
+- **运行时**增删（`StartParagraph`/`AppendToLatest`/`SetMaxSentenceCount`/pop）另调
+  `AdjustEntryDecay`/`TouchDecay`（now 单调，正确）。
+- **`Rebuild`**（load 时）清衰减后，在**公共参考时刻 now** 直接重建：段落每 token
+  `+= DecayFactor(sel.tick,now)`，种子 `+= count*DecayFactor(seed_tick_,now)`，
+  所有 `decay_t_=now`。不经过 TouchDecay。
+- `SeedUnigram(token,count,tick=0)`：tick=0→now；聚合种子计数、记 `seed_tick_`、
+  `TouchDecay(token,count,Now())`（load 时该临时权重随后被 Rebuild 覆盖，无害）。
+
+**`CostAdjustment`**：保留 `cur_count==0` 早退；`now_q=Now()`，
+`total_w=decay_total_*DecayFactor(decay_total_t_,now_q)`，guard `total_w>0`；
+`cur_w=decay_w_[cur]*DecayFactor(decay_t_[cur],now_q)`；
+`pr_unigram=max(cur_w-kUnigramDiscount,0)/total_w`。bigram 分支与 LM 混合不变。
+
+**V6 格式**：头 `SIME_USER_SENTENCE_V6`，`AcceptHeader` 兼容读 V6/V5/V4。
+时间戳用 **`@<tick>` 后缀**（保持 tab 结构、向后兼容）：
+- selection 行 `<ids…> @<tick>[\t<text>]`；seed 行 `<id> <count> @<tick>[\t<text>]`。
+- `SplitTick` 按空格切字段，末字段 `@` 开头→tick，其余为 ids；**无 `@`→tick=now**
+  （旧 V5/V4 文件视为新鲜，避免升级即失效）。
+- `LoadAndMigrate` 重切文本时**保留旧行 `@tick`**（词表迁移不丢 recency），种子同理。
+- 现有 sentences.txt 无需手动升级：新引擎读 V5（视为 now），下次 flush 自动写 V6。
+
+### 11.3 验证（全部通过）
+
+构建 `sime`/`sime-import`/插件，无 `-Wconversion` 告警。用同音竞争词
+`gongshi`（攻势 108177 LM −11.119 / 公式 108175 LM −11.140，极接近）构造 V6 种子文件：
+
+| 文件 | 公式种子 | 攻势种子 | 首位 | 说明 |
+|---|---|---|---|---|
+| fresh | 100 @now | 20 @now | **公式** −1.792 | 新鲜高计数抬升 |
+| stale | 100 @now−90天(≈12.5) | 20 @now | **攻势** −2.095 | 90天=3半衰期，公式被压回 LM 基线 |
+| half | 100 @now−30天(≈50) | 50 @now | **攻势** −2.302 | 30天权重减半→近平局，LM 决胜 |
+| fresh50 | 100 @now | 50 @now | **公式** −2.015 | 对照：新鲜公式胜攻势50 |
+
+half vs fresh50 证实 30 天半衰期（公式 100 衰减到 ≈50 后输给攻势 50）。
+- **坑 15**：单个种子词衰减会在归一化里**自我抵消**（`cur_w/total_w=1` 与衰减无关），
+  必须 ≥2 个竞争种子才能观察到排序变化。
+- **坑 16**：CLI sentence 模式只有**首位候选**显示含用户加权的分，非首位显示 LM
+  基线分；验证看**排序**而非各候选分值。
+- V5 兼容：加载 `seeds_fresh.txt`（V5）模型仍 −6.725（与方案 A 一致）。
+- 迁移保留 tick：伪造 sig 触发 `LoadAndMigrate`，公式陈旧 tick 原样保留、新导入词
+  取导入时刻，输出 V6 + 本机 sig。
+- 零回归：无 `--user` → 攻势基线首位；无历史 `decay_total_=0` → CostAdjustment 返回 0。
+
+### 11.4 部署与回滚
+
+插件由 SimeApp 重编（`-DSIME_ENGINE_ROOT=/data/tmp/Sime`、`SIME_NCNN_PROVIDER=FETCH`
+静态 ncnn 自包含）：
+```bash
+cmake --build /data/tmp/SimeApp/Linux/fcitx5/build -j16
+# libsime.so 15,055,160 B，md5 c6fee7623d3d068fffeeda0255ad06a6（含 V6/V5/V4 头）
+```
+部署两台（本机不部署），`/usr/lib/fcitx5/libsime.so`，旧版备份 `/tmp/libsime.so.old`
+（md5 c15e13c191f2f9289c650259b22f18bb）。**sentences.txt 保留不动**（V5），新引擎
+下次 flush 自动升 V6：
+```bash
+scp build/libsime.so ycd@HOST:/tmp/libsime.so.new
+# 188（fcitx5 运行中）：停→装→启，避免退出 flush 覆盖（坑 17）
+ssh ycd@192.168.1.188 'cp /usr/lib/fcitx5/libsime.so /tmp/libsime.so.old
+  kill $(pgrep -x fcitx5); while pidof fcitx5 >/dev/null; do sleep 0.3; done
+  sudo cp /tmp/libsime.so.new /usr/lib/fcitx5/libsime.so; sudo chmod 755 …'
+# 重启抓会话环境（WAYLAND_DISPLAY=wayland-1 / XDG_RUNTIME_DIR=/run/user/1000 /
+# DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus），setsid  detached 启动
+```
+- **192.168.1.188**：已生效。新进程 pid 4035386，日志 `Sime: resources loaded, GRU=ready`，
+  映射新 so，sentences 保留 V5（待 flush 升 V6）。
+- **192.168.104.126**：新插件已装 + 备份，但**用户会话 dbus 仍 failed**（同坑 13），
+  fcitx5 起不来 → 预置待激活，修复 dbus 后下次正常启动自动加载 V6 引擎。
+- **坑 17（沿用 §9.5）**：fcitx5 退出会 flush 当前状态覆盖 sentences.txt。换插件务必
+  **停→装→启**；本次保留 sentences 故 flush 无害，但若同时铺历史文件必须先停进程。
+
+回滚：还原 `/tmp/libsime.so.old`（c15e13c1，V5 引擎）并重启 fcitx5；V6 文件可被
+V5 引擎拒绝（头不符），如需回滚引擎建议同时还原 sentences 备份。衰减半衰期是
+编译期常量 `kDecayHalfLifeSec`（src/user.cc），改值重编即可调。
