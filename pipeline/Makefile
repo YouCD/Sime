@@ -1,5 +1,6 @@
 PYTHON = python3
 MIN_COUNT = 16
+MAX_VOCAB = 2000000
 COUNT_MAX = 83886080
 NPROC = 20
 SIME = ../build
@@ -49,7 +50,7 @@ merge.bin: merge.cc
 dict: $(OUT)/sime.token.dict.txt
 $(OUT)/sime.token.dict.txt $(OUT)/sime.dict.txt $(OUT)/sime.en.dict.txt &: $(OUT)/chars.cnt.txt $(UNITS) $(DICT) $(EN_WORDS) $(PUNCT) japan_chars.txt gen_dict.py
 	mkdir -p $(OUT)
-	$(PYTHON) gen_dict.py --min-count $(MIN_COUNT) --cnt $(OUT)/chars.cnt.txt --units $(UNITS) --dict $(DICT) --en-words $(EN_WORDS) --punct $(PUNCT) --jp-blacklist japan_chars.txt --token-output $(OUT)/sime.token.dict.txt --cn-output $(OUT)/sime.dict.txt --en-output $(OUT)/sime.en.dict.txt
+	$(PYTHON) gen_dict.py --min-count $(MIN_COUNT) --max-vocab $(MAX_VOCAB) --cnt $(OUT)/chars.cnt.txt --units $(UNITS) --dict $(DICT) --en-words $(EN_WORDS) --punct $(PUNCT) --jp-blacklist japan_chars.txt --token-output $(OUT)/sime.token.dict.txt --cn-output $(OUT)/sime.dict.txt --en-output $(OUT)/sime.en.dict.txt
 	cp -u $(DICT) $(OUT)/dict.txt
 	cp -u $(UNITS) $(OUT)/dict.unit
 

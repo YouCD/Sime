@@ -100,6 +100,8 @@ def main():
     parser = argparse.ArgumentParser(description="Generate Sime dictionaries")
     parser.add_argument("--min-count", type=int, default=16,
                         help="minimum corpus frequency (default: 16)")
+    parser.add_argument("--max-vocab", type=int, default=(1 << 18) - 50,
+                        help="token vocab cap; overflow trims English tail")
     parser.add_argument("--cnt", default="chars.cnt.txt",
                         help="corpus word frequency file (word\\tfreq)")
     parser.add_argument("--units", default="chinese_units.txt",
@@ -158,7 +160,7 @@ def main():
     print(f"pinyin entries: {len(units)}", file=sys.stderr)
 
     # ── Step 1: sime.token.dict.txt (closed vocabulary, whitelist only) ──
-    max_vocab = (1 << 18) - 50
+    max_vocab = args.max_vocab
 
     all_tokens = []
     all_seen = set()
@@ -238,7 +240,7 @@ def main():
     en_start = cn_kept
     en_end = cn_kept + en_kept
     if len(all_tokens) > max_vocab:
-        overflow = len(all_tokens) - max_vocab
+        overflow = min(len(all_tokens) - max_vocab, en_kept)
         # 从英文尾部砍掉 overflow 个，保留标点
         en_tokens = all_tokens[en_start:en_end]
         punct_tokens = all_tokens[en_end:]

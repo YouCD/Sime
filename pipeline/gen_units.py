@@ -10,7 +10,7 @@ import os
 import sys
 from collections import defaultdict
 
-RIME_DIR = "/home/tfbao/new/rime-ice/cn_dicts"
+RIME_DIR = "/home/ycd/tmp/rime-ice/cn_dicts"
 
 # 按优先级排列，靠前的权重优先
 DICT_FILES = [
