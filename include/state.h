@@ -17,6 +17,7 @@ struct State {
     const State* backtrace_state = nullptr;
     TokenID backtrace_token = 0;
     const char* backtrace_pieces = nullptr;
+    bool backtrace_english = false;
 
     State() = default;
 

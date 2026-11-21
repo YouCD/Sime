@@ -100,14 +100,31 @@ std::string Sime::ExtractUnits(const std::vector<Link>& path,
 std::string Sime::ExtractText(const std::vector<Link>& path,
                               std::string_view input) const {
     std::u32string u32;
-    for (const auto& link : path) {
+    for (std::size_t i = 0; i < path.size(); ++i) {
+        const auto& link = path[i];
         if (link.id == NotToken) {
-            // A ▁ (space) boundary link renders as a single space; apostrophe
-            // links render nothing. Suppress a duplicate space when the
-            // previous token already ended in one.
-            if (link.start < input.size() &&
-                input[link.start] == static_cast<char>(0xE2) &&
-                (u32.empty() || u32.back() != U' ')) {
+            // A ▁ (space) boundary always renders a space. An apostrophe
+            // boundary renders one only when adjacent to an English token
+            // (yong'grep'sousuo → 用 grep 搜索); pure-pinyin apostrophes
+            // (xi'an → 西安) stay seamless. Suppress duplicate spaces.
+            bool render = false;
+            if (link.start < input.size()) {
+                const char c = input[link.start];
+                if (c == static_cast<char>(0xE2)) {
+                    render = true;
+                } else if (c == '\'') {
+                    bool prev_en = false;
+                    bool next_en = false;
+                    for (std::size_t j = i; j-- > 0;) {
+                        if (path[j].id != NotToken) { prev_en = path[j].english; break; }
+                    }
+                    for (std::size_t j = i + 1; j < path.size(); ++j) {
+                        if (path[j].id != NotToken) { next_en = path[j].english; break; }
+                    }
+                    render = prev_en || next_en;
+                }
+            }
+            if (render && (u32.empty() || u32.back() != U' ')) {
                 u32.push_back(U' ');
             }
             continue;
@@ -246,6 +263,7 @@ void Sime::Process(std::vector<Node>& net) const {
                     value.score + step + word.penalty + user_adjust;
                 State next(next_cost, word.end, cur_pos, &value, word.id,
                            word.pieces);
+                next.backtrace_english = word.english;
                 net[word.end].states.Insert(next);
             }
         }
@@ -259,9 +277,11 @@ std::vector<Sime::Link> Sime::Backtrace(
     const State* state = &tail_state;
     while (state != nullptr && state->backtrace_state != nullptr) {
         const State* prev = state->backtrace_state;
-        path.push_back({prev->now, state->now,
-                        state->backtrace_token,
-                        state->backtrace_pieces});
+        path.push_back({.start = prev->now,
+                        .end = state->now,
+                        .id = state->backtrace_token,
+                        .pieces = state->backtrace_pieces,
+                        .english = state->backtrace_english});
         state = prev;
     }
     std::reverse(path.begin(), path.end());

@@ -30,14 +30,17 @@ void Sime::ComputeEdgePenalties(std::vector<Node>& net,
     const float_t expansion_penalty = short_input
         ? ExpansionPenaltyShort : ExpansionPenalty;
 
-    // Mixed-script input (contains a typed space → ▁). Pre-collect CN-track
-    // edge spans so a mid-sentence English span that shares start/end with a
-    // Chinese reading keeps the heavy penalty (women / song rival guard).
-    const bool has_space =
-        input.find(static_cast<char>(0xE2)) != std::string_view::npos;
+    // Mixed-script input (a typed space → ▁, or an apostrophe word boundary).
+    // Pre-collect CN-track edge spans so a mid-sentence English span that shares
+    // start/end with a Chinese reading keeps the heavy penalty (women / song
+    // rival guard). Apostrophe-delimited pure pinyin (xi'an → 西安) has no
+    // English edges, so the mid-sentence branch never fires for it.
+    const bool has_boundary =
+        input.find(static_cast<char>(0xE2)) != std::string_view::npos ||
+        input.find('\'') != std::string_view::npos;
     std::unordered_set<std::uint64_t> cn_spans;
     std::unordered_set<std::uint64_t> cn_spans_exact;
-    if (has_space) {
+    if (has_boundary) {
         for (const auto& col : net) {
             for (const auto& e : col.es) {
                 if (e.english || e.id == NotToken) continue;
@@ -70,7 +73,7 @@ void Sime::ComputeEdgePenalties(std::vector<Node>& net,
                         en_pen = short_english ? english_penalty_short_
                                                : english_penalty_;
                     }
-                } else if (has_space) {
+                } else if (has_boundary) {
                     std::string_view span =
                         input.substr(edge.start, edge.end - edge.start);
                     const std::uint64_t key =

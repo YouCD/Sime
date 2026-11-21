@@ -150,6 +150,36 @@ TEST_CASE("mixed script: English words survive inside a pinyin sentence") {
     CHECK(top("hello") == "hello");
 }
 
+TEST_CASE("apostrophe works as a mixed-script separator (space commits in IME)") {
+    if (!HasModel()) return;
+    Fixture f;
+    REQUIRE(f.engine.Ready());
+
+    auto top = [&](const char* in) {
+        auto r = f.engine.DecodeSentence(in, 0);
+        REQUIRE(!r.empty());
+        return r[0].text;
+    };
+
+    // Apostrophe-delimited English renders with spaces, same as typed spaces.
+    CHECK(top("yong'grep'sousuo") == "用 grep 搜索");
+    CHECK(top("yong'vim'bianji") == "用 vim 编辑");
+    CHECK(top("shuo'hello'women") == "说 hello 我们");
+    // Pure-pinyin apostrophes stay seamless (no English adjacent).
+    CHECK(top("xi'an") == "西安");
+    CHECK(top("chang'an") == "长安");
+    // CN-rival guard still applies through apostrophes.
+    CHECK(top("chang'song").find("song") == std::string::npos);
+
+    // Apostrophe and space paths score identically for the same sentence.
+    auto apos = f.engine.DecodeSentence("yong'grep'sousuo", 0);
+    auto space = f.engine.DecodeSentence("yong grep sousuo", 0);
+    REQUIRE(!apos.empty());
+    REQUIRE(!space.empty());
+    CHECK(apos[0].text == space[0].text);
+    CHECK(apos[0].score == doctest::Approx(space[0].score));
+}
+
 TEST_CASE("T9 key-typo correction is opt-in and recovers mistypes") {
     if (!HasModel()) return;
     Fixture f;
