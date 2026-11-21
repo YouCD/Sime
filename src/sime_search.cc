@@ -100,6 +100,8 @@ std::string Sime::ExtractUnits(const std::vector<Link>& path,
 std::string Sime::ExtractText(const std::vector<Link>& path,
                               std::string_view input) const {
     std::u32string u32;
+    bool have_prev_token = false;
+    bool prev_token_english = false;
     for (std::size_t i = 0; i < path.size(); ++i) {
         const auto& link = path[i];
         if (link.id == NotToken) {
@@ -129,6 +131,20 @@ std::string Sime::ExtractText(const std::vector<Link>& path,
             }
             continue;
         }
+        // An expansion edge may swallow a trailing apostrophe/space into
+        // its span (e.g. 用 emitted over "yong'"), leaving no NotToken
+        // boundary link before the next token. If a separator sits right
+        // before this token in the input and the script changes (CN<->EN),
+        // render the space here so mixed text stays readable regardless of
+        // which path won.
+        if (have_prev_token && link.start > 0 && link.start <= input.size()) {
+            const char pc = input[link.start - 1];
+            const bool sep = (pc == '\'') || (pc == static_cast<char>(0xE2));
+            if (sep && prev_token_english != link.english &&
+                (u32.empty() || u32.back() != U' ')) {
+                u32.push_back(U' ');
+            }
+        }
         std::u32string t = ToText(link);
         // SentencePiece-style pieces may carry a leading ▁; don't double the
         // space we just emitted for the boundary link.
@@ -136,6 +152,8 @@ std::string Sime::ExtractText(const std::vector<Link>& path,
             t.erase(t.begin());
         }
         u32 += t;
+        have_prev_token = true;
+        prev_token_english = link.english;
     }
     return TextFromU32(u32);
 }
