@@ -34,7 +34,7 @@ constexpr std::string_view kCommonEnglish[] = {
     "make", "mkfs", "mvc", "mvvm",
     "nat", "nice", "nl", "node", "npm", "nvme",
     "od", "oop",
-    "pci", "pcie", "perf", "perl", "pip", "psql", "pwa",
+    "pci", "pcie", "perf", "perl", "pip", "psql", "pwa", "pwd",
     "qemu",
     "raid", "ram", "rar", "rest", "rpc", "rpm", "ruby", "rust",
     "sata", "sbt", "scp", "sd", "sed", "seq", "sh", "snap", "sort",
