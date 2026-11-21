@@ -1103,4 +1103,108 @@ ssh ycd@192.168.1.188 'cp /usr/lib/fcitx5/libsime.so /tmp/libsime.so.old
 
 回滚：还原 `/tmp/libsime.so.old`（c15e13c1，V5 引擎）并重启 fcitx5；V6 文件可被
 V5 引擎拒绝（头不符），如需回滚引擎建议同时还原 sentences 备份。衰减半衰期是
+
+## 12. 二开六项 + 单元测试体系（2026-11-21 追加）
+
+引擎 `57aefac` 之后落地六项二开，**默认配置零回归**（四集逐位一致），新增逻辑
+尽量抽成免模型纯函数 + doctest 单测。插件 md5 `b3f4bd57eeb7db2ab68be04f5fa802b4`
+（15,281,976 B）。
+
+### 12.1 六项设计与插入点
+
+1. **混排句中英文识别**（`yong grep sousuo`→用 grep 搜索）。`InitNet` 把空格
+   归一化的 ▁(U+2581, E2 96 81) 当自由跨越边：贪心 walk 消费 3 字节标 terminal、
+   列循环发 `{s,s+3,NotToken}` 并跳过内部字节、expansion 内层边界 walk 遇 ▁ break、
+   英文尾补全在首个 ▁ 截断（边 end 改为 ▁ 位）、纠错 DFS break 条件加 ▁ 三字节。
+   `ExtractText(path,input)` 对 ▁ NotToken 边渲染单个空格（抑制 SentencePiece 前导
+   ▁ 重复空格）。惩罚 span 化：`full_cover` 分支逐字节保持原样；新增 mid-sentence
+   分支用纯函数 `ComputeEnglishPenalty`，**CN 竞争守卫**——whitelist 确信词只受
+   *精确* CN 边（`!expansion`）守卫（grep 的展开简拼"热盘"不算竞争），其余词需无任何
+   CN 边且 `!IsKnownPinyin(span)` 才放松（women/song/long 保持重惩罚）。仅当输入含 ▁
+   才进新分支 → 纯中文/纯英文/T9 不受影响。
+2. **关键参数运行时可配置**：编译期常量改成员 + setter（默认=旧值），fcitx5 Option
+   热重载（`applyConfig`，整数百分比 /100.0）。见 §12.4。
+3. **用户感知下一词预测**：`NextTokens` 取 pool 后对全候选折叠
+   `user_sentence_.CostAdjustment(prev,tid,pro)`（≤0），按 adj_cost 升序 stable_sort
+   再取 num。无历史 adj=0 → 排序同纯 LM（零回归）。复用衰减 unigram/bigram + 种子。
+4. **双字母命令**：纯函数 `IsTwoLetterCommand`（curated 集，排除合法拼音 du 与
+   nm/us/be/up 等非命令）。`ComputeEdgePenalties` full-cover len==2 命中 → 温和
+   `english_penalty_`(2.5) 而非 8.0（不给 -3.0 强 bonus，避免压垮简拼）；whitelist
+   词（wc/ls/cd/sh/jq…）仍走原 -3.0。实测 ps 抬升居首、mv 列第二（女仍首）、ping/du 不变。
+5. **T9 拼音纠错**：纯函数 `pinyin_correct::T9TypoVariants`（长度保持的相邻转置 +
+   电话键位邻键替换，仅留已知 T9 音节）。`InitNumNet` digit 展开后、tier filter 前
+   加有界 DFS（≤3 音节、预算 32），**仅对无效且不可扩展的数字段**发纠错边（valid 输入
+   与简拼前缀不触发），键为数字串经 `PrefixSearchT9` 解析，cost=typo_correction_penalty_。
+   **独立开关 `t9_correction_enabled_` 默认关闭**（见坑 18）。开启后 `96635`(wo+误拼
+   men 636→635)→我们居首；精确 `94664486`→中国不变。
+6. **GRU 自适应 scale**：纯函数 `AdaptiveGruScale(base,spread,n,input_len)`，
+   `spread=l1[0].score-l1[min(10,size)-1].score`，`scale=base*clamp(1+0.1*(2-spread),0.5,1.5)`，
+   n≤1 或 len≤2 保持 base。`RerankWithGru` 增 adaptive/input_len 参数。**开关
+   `adaptive_gru_enabled_` 默认关闭**（无正式域分类器，启发式收益边际）；关闭==固定 0.40/0.50。
+
+### 12.2 文件拆分（>500 行约束）
+
+特性前先做行为保持的纯代码移动，四集逐位一致后再叠加：`sime.cc`(1629)→
+sime/sime_net_pinyin/sime_net_num/sime_penalty/sime_english/sime_search/sime_decode/
+sime_predict/sime_gru + `sime_detail.h`；`user.cc`(856)→user/user_decay/user_persist；
+`trie.cc`(870)→trie/trie_serialize/trie_pinyin/trie_build + `trie_detail.h`；
+`construct.cc`(905)→construct/construct_smooth/construct_io + `construct_detail.h`
+（模板成员须头文件可见）；`score.cc`(535)→score/score_query。全部文件 <500 行。
+
+### 12.3 单元测试体系（doctest，60 用例全绿）
+
+`cmake/Doctest.cmake` FetchContent 单头；根 `option(SIME_BUILD_TESTS OFF)` +
+`SIME_TEST_MODEL_DIR` cache。免模型单测：test_user_sentence（计数/衰减/持久化/迁移）、
+test_pinyin_correct（Fuzzy/Typo/**T9Typo**）、test_dict_static、test_ustr、
+test_config（默认值/setter）、test_helpers（**IsTwoLetterCommand/ComputeEnglishPenalty/
+AdaptiveGruScale** 纯函数）。gated 集成 test_decode（需模型目录）：预测零回归 + 用户种子
+抬升 + 英文过滤、双字母命令、混排英文、T9 纠错 opt-in 恢复。
+```bash
+cmake -S /data/tmp/Sime -B build -DSIME_BUILD_TESTS=ON \
+  -DSIME_TEST_MODEL_DIR=/data/tmp/Sime/pipeline/output-news3-tech
+cmake --build build -j16 && ctest --test-dir build --output-on-failure  # 60/60
+```
+
+### 12.4 运行时配置项（fcitx5 Option → 引擎 setter）
+
+| Option | 引擎接口 | 默认 |
+|---|---|---|
+| GruPinyinScale(%) / GruT9Scale(%) | SetGruScales | 40 / 50 |
+| AdaptiveGru | SetAdaptiveGruEnabled | false |
+| EnableFuzzy / EnableTypo | SetCorrectionEnabled | true / true |
+| T9Correction | SetT9CorrectionEnabled | false |
+| EnglishWhitelist | SetEnglishWhitelistEnabled | true |
+| UserSentence | SetUserSentenceEnabled | true |
+| UserWeight(%) | MutableUserSentence().SetWeight | 20 |
+| DecayHalfLifeDays | MutableUserSentence().SetDecayHalfLife | 30 |
+
+fcitx5-config 无 double 类型 → 比例用 `Option<int,IntConstrain>` 整数百分比，
+applyConfig /100.0。GUI 由 fcitx5-configtool 自动生成，值存 ~/.config/fcitx5/conf/sime.conf。
+
+### 12.5 评测（部署模型 output-news3-tech，默认配置）
+
+四集（cases.1/2 全拼、cases.num.1/2 T9）与 §10.4 基线**逐位一致**（diff 全等），
+准确率不变：cases.1 句 68.08/字 92.86、cases.2 43.65/85.60、num.1 53.40/86.32、
+num.2 29.85/76.61。混排/双字母为加性守卫分支（纯中文/纯英文/精确 T9 不进新分支），
+T9 纠错与自适应 GRU 默认关闭。手测：`yong grep sousuo`→用 grep 搜索、
+`chang song`→长 送（song 不被抬）、`shuo hello women`→说 hello 我们、ps 居首、ping→平。
+
+### 12.6 部署与回滚
+
+```bash
+cmake --build /data/tmp/SimeApp/Linux/fcitx5/build -j16   # libsime.so b3f4bd57…
+scp build/libsime.so ycd@HOST:/tmp/libsime.so.new
+# 旧版备份 /tmp/libsime.so.bak-sixfeat（c6fee762…，V6 引擎）
+```
+- **192.168.1.188**：停→装→启（坑 17），新 pid 12233，日志
+  `Sime: resources loaded, GRU=ready`，单实例，映射 b3f4bd57，sentences 保留。
+- **192.168.104.126**：已装 + 备份，**dbus 仍 failed**（坑 13），fcitx5 未运行 →
+  预置待激活，修复 dbus 后下次正常启动自动加载六项引擎。
+- 本机不部署。回滚：还原 `/tmp/libsime.so.bak-sixfeat` 并重启 fcitx5。
+- **坑 18（T9 加性纠错的跨度优势）**：Layer2 距离惩罚 ≈11.1/位（|UnknownPenalty|20 /
+  DistancePenalty1.8），远超纠错代价 7。任何覆盖*更多*数字位的纠错边都会经 dist_penalty
+  优势压过精确短词（如 我姓何 8 位 顶掉 我依稀 6 位），即便仅对无效段纠错亦然——评测集
+  含此类段。字母通道无此问题（纠错不改变 span 长度，且 valid 输入恒有精确逐字解析）。
+  故 T9 纠错**默认关闭、可选开启**；fuzzy-on-valid 方案因 T9 数字歧义会生成更长 span
+  新候选，回归更重，已弃用，改长度保持的按键纠错。
 编译期常量 `kDecayHalfLifeSec`（src/user.cc），改值重编即可调。
