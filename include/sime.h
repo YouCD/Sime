@@ -26,7 +26,7 @@ struct DecodeResult {
 
 class Sime {
 public:
-    Sime() = default;
+    Sime();
     Sime(const std::filesystem::path& dict_path,
          const std::filesystem::path& model_path);
     ~Sime();
@@ -66,6 +66,47 @@ public:
     // UTF-8 text for a single token id, sourced from the dict's
     // mmap'd token table. Empty for NotToken or out-of-range ids.
     std::string TokenText(TokenID id) const;
+
+    // Runtime tuning. Defaults equal the historical compile-time values,
+    // so an unconfigured engine behaves exactly as before. Setters are
+    // cheap value assignments meant to be called from the fcitx5 config
+    // hot-reload path; they take effect on the next decode.
+    void SetEnglishPenalties(float_t normal, float_t short_input,
+                             float_t whitelist) {
+        english_penalty_ = normal;
+        english_penalty_short_ = short_input;
+        english_whitelist_penalty_ = whitelist;
+    }
+    void SetEnglishWhitelistEnabled(bool enabled) {
+        english_whitelist_enabled_ = enabled;
+    }
+    bool EnglishWhitelistEnabled() const { return english_whitelist_enabled_; }
+    void SetCorrectionEnabled(bool fuzzy, bool typo) {
+        enable_fuzzy_correction_ = fuzzy;
+        enable_typo_correction_ = typo;
+    }
+    void SetCorrectionPenalties(float_t fuzzy, float_t typo) {
+        fuzzy_pinyin_penalty_ = fuzzy;
+        typo_correction_penalty_ = typo;
+    }
+    bool FuzzyCorrectionEnabled() const { return enable_fuzzy_correction_; }
+    bool TypoCorrectionEnabled() const { return enable_typo_correction_; }
+    // T9 key-typo correction is opt-in (default off): additive corrected edges
+    // can span more digits than the best exact Layer-2 word and win via the
+    // distance penalty, perturbing correct-input rankings. Off keeps the T9
+    // eval bit-identical; on recovers genuine mistypes.
+    void SetT9CorrectionEnabled(bool enabled) { t9_correction_enabled_ = enabled; }
+    bool T9CorrectionEnabled() const { return t9_correction_enabled_; }
+    void SetGruScales(float_t pinyin, float_t t9) {
+        gru_pinyin_scale_ = pinyin;
+        gru_t9_scale_ = t9;
+    }
+    // Adaptive GRU domain bias is opt-in (default off): the spread heuristic
+    // is marginal without a formal-domain classifier. Off == fixed scales.
+    void SetAdaptiveGruEnabled(bool enabled) { adaptive_gru_enabled_ = enabled; }
+    bool AdaptiveGruEnabled() const { return adaptive_gru_enabled_; }
+    float_t GruPinyinScale() const { return gru_pinyin_scale_; }
+    float_t GruT9Scale() const { return gru_t9_scale_; }
 
     // Decode
     std::vector<DecodeResult> DecodeStr(std::string_view input,
@@ -149,37 +190,41 @@ private:
     // Flat penalty for English edges so Chinese full-pinyin matches rank
     // higher in beam search and Layer 2, while common English words
     // (iphone, hello) still surface when there's no strong Chinese rival.
-    static constexpr float_t EnglishPenalty = 2.5;
+    // Runtime-configurable; defaults = historical compile-time values.
+    float_t english_penalty_ = 2.5;
     // Short-input English penalty: very short inputs (≤3 letters/digits)
     // where an English exact word coincidentally spell-matches the input
     // (e.g. "nm" / "us" / "be" / "men") need a stronger nudge so CN 简拼
-    // candidates can win — the LM's <eos>|english=0 transition gives
-    // English an unfair tail-cost edge in beam scoring otherwise. Length
-    // 4+ full-cover English (grep / bash / code) uses EnglishPenalty.
-    static constexpr float_t EnglishPenaltyShort = 8.0;
+    // candidates can win. Length 4+ full-cover English uses english_penalty_.
+    float_t english_penalty_short_ = 8.0;
     // Bonus (negative penalty) for full-cover English edges whose text is
     // a curated common short command / tech word (≤4 letters, e.g. awk /
-    // sed / ssh / tar / bash / code). These are confident English intent
-    // for a developer, so they must beat CN 简拼 / 同音 rivals (爱玩客 /
-    // 色调 / 上市 / 他人 / 巴士 / 从的) whose LM frequency is much higher.
-    // Scoped to ≤4 letters so longer English keeps EnglishPenalty.
-    static constexpr float_t EnglishWhitelistPenalty = -3.0;
+    // sed / ssh / tar / bash / code). Confident English intent for a
+    // developer, so they must beat CN 简拼 / 同音 rivals. Scoped to ≤4
+    // letters so longer English keeps english_penalty_.
+    float_t english_whitelist_penalty_ = -3.0;
+    bool english_whitelist_enabled_ = true;
     // Pinyin correction (additive edges; exact path untouched). Fuzzy
     // pronunciation (zh/z, n/l, ang/an ...) costs less than a keyboard typo
     // (edit distance 1) because it is a systematic, higher-confidence
-    // reinterpretation. Both sit above EnglishPenalty so a correct exact
+    // reinterpretation. Both sit above english_penalty_ so a correct exact
     // pinyin match always outranks a corrected rival.
-    static constexpr float_t FuzzyPinyinPenalty = 5.0;
-    static constexpr float_t TypoCorrectionPenalty = 7.0;
-    static constexpr bool kEnableFuzzyCorrection = true;
-    static constexpr bool kEnableTypoCorrection = true;
+    float_t fuzzy_pinyin_penalty_ = 5.0;
+    float_t typo_correction_penalty_ = 7.0;
+    bool enable_fuzzy_correction_ = true;
+    bool enable_typo_correction_ = true;
+    bool t9_correction_enabled_ = false;
+    // GRU rerank scales (full-pinyin / T9). Runtime-configurable.
+    float_t gru_pinyin_scale_ = 0.40;
+    float_t gru_t9_scale_ = 0.50;
+    bool adaptive_gru_enabled_ = false;
 
     // Lattice building
     void InitNet(std::string_view input,
                     std::vector<Node>& net,
                     bool expansion = true) const;
-    static void ComputeEdgePenalties(std::vector<Node>& net,
-                                     std::string_view input);
+    void ComputeEdgePenalties(std::vector<Node>& net,
+                              std::string_view input) const;
     void PruneNode(std::vector<Link>& edges,
                    std::unordered_map<TokenID, float_t>* score_cache = nullptr) const;
 
@@ -190,7 +235,8 @@ private:
                                        std::size_t end);
 
     std::u32string ToText(const Link& n) const;
-    std::string ExtractText(const std::vector<Link>& path) const;
+    std::string ExtractText(const std::vector<Link>& path,
+                            std::string_view input) const;
     static std::string ExtractUnits(const std::vector<Link>& path,
                                     std::string_view input);
     static std::string AbbreviatePieces(const char* full_pieces,

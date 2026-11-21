@@ -13,14 +13,30 @@ add_library(sime_core
     ${NEW_SRC_DIR}/ustr.cc
     ${NEW_SRC_DIR}/count.cc
     ${NEW_SRC_DIR}/construct.cc
+    ${NEW_SRC_DIR}/construct_smooth.cc
+    ${NEW_SRC_DIR}/construct_io.cc
     ${NEW_SRC_DIR}/convert.cc
     ${NEW_SRC_DIR}/compact.cc
     ${NEW_SRC_DIR}/score.cc
+    ${NEW_SRC_DIR}/score_query.cc
     ${NEW_SRC_DIR}/dict.cc
     ${NEW_SRC_DIR}/state.cc
     ${NEW_SRC_DIR}/user.cc
+    ${NEW_SRC_DIR}/user_decay.cc
+    ${NEW_SRC_DIR}/user_persist.cc
     ${NEW_SRC_DIR}/sime.cc
+    ${NEW_SRC_DIR}/sime_net_pinyin.cc
+    ${NEW_SRC_DIR}/sime_net_num.cc
+    ${NEW_SRC_DIR}/sime_penalty.cc
+    ${NEW_SRC_DIR}/sime_english.cc
+    ${NEW_SRC_DIR}/sime_search.cc
+    ${NEW_SRC_DIR}/sime_decode.cc
+    ${NEW_SRC_DIR}/sime_predict.cc
+    ${NEW_SRC_DIR}/sime_gru.cc
     ${NEW_SRC_DIR}/trie.cc
+    ${NEW_SRC_DIR}/trie_serialize.cc
+    ${NEW_SRC_DIR}/trie_pinyin.cc
+    ${NEW_SRC_DIR}/trie_build.cc
     ${NEW_SRC_DIR}/cut.cc
     ${NEW_SRC_DIR}/gru_reranker.cc
     ${NEW_SRC_DIR}/pinyin_correct.cc
@@ -93,4 +109,12 @@ if(SIME_BUILD_TOOLS)
     foreach(target_name IN LISTS _sime_targets)
         target_compile_options(${target_name} PRIVATE -Wall -Wextra -pedantic -Wconversion)
     endforeach()
+endif()
+
+option(SIME_BUILD_TESTS "Build Sime unit tests (doctest)" OFF)
+set(SIME_TEST_MODEL_DIR "" CACHE PATH "Model dir for gated decode integration tests")
+if(SIME_BUILD_TESTS)
+    include(${NEW_ROOT}/cmake/Doctest.cmake)
+    enable_testing()
+    add_subdirectory(tests)
 endif()

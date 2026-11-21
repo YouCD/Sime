@@ -74,6 +74,12 @@ public:
     void SetWeight(float_t weight);
     float_t Weight() const { return weight_; }
 
+    // Recency half-life (days) of the unigram tail decay. Default 30.
+    // Setting rebuilds the decayed weights at the new rate. days <= 0
+    // disables decay (every weight keeps full mass regardless of age).
+    void SetDecayHalfLife(double days);
+    double DecayHalfLife() const;
+
     // Records a single user pick. `context` is the recent committed
     // tokens (typically `scorer_.Num()-1` deep). If the most recent
     // paragraph's flattened tail equals `context`, the new selection
@@ -124,7 +130,7 @@ private:
     // weights decay at the same rate, so mere time passing never
     // reorders words; only fresh picks lift recent words over stale
     // ones. Bigram math is untouched (uses raw paragraph counts).
-    static double DecayFactor(std::uint32_t from, std::uint32_t to);
+    double DecayFactor(std::uint32_t from, std::uint32_t to) const;
     // Fold `delta` fresh weight for `token` into the decayed totals,
     // refreshing both the token's and the global timestamp to `now`.
     void TouchDecay(TokenID token, double delta, std::uint32_t now);
@@ -166,6 +172,9 @@ private:
     std::unordered_map<TokenID, std::uint32_t> decay_t_;
     double decay_total_ = 0;
     std::uint32_t decay_total_t_ = 0;
+    // ln2 / half-life-seconds; 0 = decay disabled. Default = 30-day
+    // half-life, matching the historical compile-time constant.
+    double decay_lambda_ = 0.69314718055994530942 / (30.0 * 86400.0);
 };
 
 } // namespace sime

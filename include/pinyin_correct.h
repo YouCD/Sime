@@ -20,4 +20,12 @@ std::vector<std::string> FuzzyVariants(std::string_view syllable);
 // input is not needlessly reinterpreted.
 std::vector<std::string> TypoVariants(std::string_view segment);
 
+// T9 digit-space typo corrections of an *invalid* digit span: adjacent
+// transposition and phone-keypad-adjacent single-digit substitution.
+// Length-preserving; returns only spans that are known T9 syllables, excluding
+// the input itself. Intended for digit spans that do NOT parse as a valid T9
+// syllable (and are not extendable prefixes), so correct T9 input and
+// abbreviations are never reinterpreted.
+std::vector<std::string> T9TypoVariants(std::string_view digits);
+
 } // namespace sime::pinyin_correct

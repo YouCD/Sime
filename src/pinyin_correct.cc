@@ -36,6 +36,30 @@ void Dedup(std::vector<std::string>& v) {
     v.erase(std::unique(v.begin(), v.end()), v.end());
 }
 
+void AddIfValidT9(std::vector<std::string>& out, std::string_view input,
+                  std::string candidate) {
+    if (candidate == input) return;
+    if (Dict::IsKnownT9Syllable(candidate)) out.push_back(std::move(candidate));
+}
+
+// Orthogonal neighbours on the phone keypad (1 carries no letters):
+//   2 3
+//   4 5 6
+//   7 8 9
+std::string_view KeypadNeighbors(char c) {
+    switch (c) {
+        case '2': return "35";
+        case '3': return "26";
+        case '4': return "57";
+        case '5': return "2468";
+        case '6': return "359";
+        case '7': return "48";
+        case '8': return "579";
+        case '9': return "68";
+        default: return {};
+    }
+}
+
 } // namespace
 
 std::vector<std::string> FuzzyVariants(std::string_view syllable) {
@@ -113,6 +137,39 @@ std::vector<std::string> TypoVariants(std::string_view segment) {
             std::string c = s;
             c.insert(i, 1, letter);
             AddIfValid(out, s, std::move(c));
+        }
+    }
+
+    Dedup(out);
+    if (cache.size() > 8192) cache.clear();
+    cache.emplace(s, out);
+    return out;
+}
+
+std::vector<std::string> T9TypoVariants(std::string_view digits) {
+    const std::string s(digits);
+    if (s.size() < 2 || s.size() > 6) return {};
+
+    static thread_local std::unordered_map<std::string, std::vector<std::string>>
+        cache;
+    auto it = cache.find(s);
+    if (it != cache.end()) return it->second;
+
+    std::vector<std::string> out;
+    const std::size_t n = s.size();
+
+    // Adjacent transposition.
+    for (std::size_t i = 0; i + 1 < n; ++i) {
+        std::string c = s;
+        std::swap(c[i], c[i + 1]);
+        AddIfValidT9(out, s, std::move(c));
+    }
+    // Keypad-adjacent single-digit substitution (length-preserving).
+    for (std::size_t i = 0; i < n; ++i) {
+        for (char nb : KeypadNeighbors(s[i])) {
+            std::string c = s;
+            c[i] = nb;
+            AddIfValidT9(out, s, std::move(c));
         }
     }
 
