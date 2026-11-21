@@ -1208,3 +1208,98 @@ scp build/libsime.so ycd@HOST:/tmp/libsime.so.new
   故 T9 纠错**默认关闭、可选开启**；fuzzy-on-valid 方案因 T9 数字歧义会生成更长 span
   新候选，回归更重，已弃用，改长度保持的按键纠错。
 编译期常量 `kDecayHalfLifeSec`（src/user.cc），改值重编即可调。
+
+## 13. Linux 命令行语料注入：命令→选项/子命令预测（2026-11-21 追加）
+
+目标：提交 `ps` 后联想出常用选项（`aux`），`git`/`docker`/`apt` 出子命令。
+方案 B（全量实施：语料→增量重训→四集门禁→部署），词表/GRU 不变（轻量注入）。
+
+### 13.1 语料来源与生成（`linux/gen_corpus.py`）
+
+三源混合（用户确认）：
+- **tldr-pages/tldr**（`pages/{common,linux}/*.md`，6856 页）：反引号示例为主力，
+  剥 `{{placeholder}}` 模板，×3 权重。
+- **TellinaTool/nl2bash**（`data/bash/all.cm`，12607 行）：真实命令搭配，×2。
+- **126 `.zsh_history`**（13613 命令）：按规范化命令的 √频次加权（封顶 8），反映个人高频。
+
+清洗切词（输出空格分隔**预切词**，喂 `sime-count`）：
+- 小写化；shell 操作符 `|;&(){}<>` 两侧补空格成独立 token（OOV → sime-count 断窗，
+  保留管道/序列边界，避免跨段伪造 bigram）。
+- flag 领先 `-` 拆成独立标点 token（`-ef`→`- ef`、`--all`→`- - all`）。
+- 过滤：首词须在词表、且 ≥2 token（聚焦 bigram）。
+
+产出 `linux/linux.cut.txt` **75897 行**（tldr 14377×3 + nl2bash 11863×2 + zsh 加权 9040）。
+关键搭配：`ps aux`×59、`git commit`×75、`docker ps`×6、`ps - ef` 等。
+
+### 13.2 增量重建（同 §9.3，只换 sime.cnt）
+
+```bash
+cd pipeline
+# 标点表去掉 '-'（linux/punct-nodash.txt = punct.txt 删 '-' 行），让 dash 作为
+# 连接 token，使 ls→-→la / ps→-→ef 成词（见坑 19）。
+../build/sime-count -n 3 -d output-news3-tech/sime.token.dict.txt \
+  -o linux/linux -s linux/swap -p linux/punct-nodash.txt -c 1000000 linux/linux.cut.txt
+make merge.bin
+mkdir -p output-news3-linux
+for n in 1 2 3; do
+  ./merge.bin -n $n -o output-news3-linux/raw.${n}gram \
+    output-news3-tech/raw.${n}gram linux/linux.${n}gram &
+done; wait
+AV=$(( $(stat -c%s output-news3-linux/raw.1gram) / 8 ))   # 1505957
+../build/sime-construct output-news3-linux/raw -n 3 -o /tmp/linux.raw.cnt \
+  -c 0,1,2 -w "$AV" -r 10000000,4000000 -m 15
+../build/sime-compact /tmp/linux.raw.cnt output-news3-linux/sime.cnt
+# trie/GRU/词表全复用 tech（软链）
+```
+
+词表数不变 1,505,957；新增约 **3009 bigram / 6211 trigram**（含 dash 连接 `-→la/-→ef` 等）。
+新 `sime.cnt` 135,507,986 B（比 tech 大 17,580 B）。
+
+### 13.3 预测验证与插件英文-only 修复（关键）
+
+CLI `--next` 手测：`git`→clone/remote/push/diff/checkout、`docker`→compose/container/run/pull、
+`apt`→install/list 均出子命令。`ps` 的 **`--next-en`（英文-only）`aux` 排 [0]**。
+
+- **坑 19（标点断上下文 → dash 非标点化）**：`sime-count` 对标点 token 先喂再 reset_windows。
+  初版用 `punct.txt`（含 `-`），`ps - ef` 只形成 `ps→-`，`-→ef` 不成立 → `ls` 等全 dash 选项
+  的命令联想只剩光杆 `-`。**修复**：linux 计数改用 `punct-nodash.txt`（删 `-`），dash 作连接 token，
+  `ls→-→la`、`ps→-→ef` 成词。预测两步：`ls`→`-`→`la/lh/l`。BSD 无标点选项（`ps aux`）与
+  子命令（git/docker/apt）一步直达。`aux`/`ef`/`la`/`lh` 本就在词表。
+- **坑 20（英文命令预测：合并 dash 选项）**：插件原 `NextTokens(ctx,n)` 默认 en=false，`ps` 后
+  全局高频标点 `/ ： ，` 与「的」把 `aux` 压到首页外。一度改 en=true，但 `ls` 选项全是 dash，
+  英文-only 查询返回**空** → `ls` 提交后无候选。**最终方案**：`showPredictions` 对英文命令
+  （`isEnglishWord`）合并两路——① en=true 取无 dash 选项/子命令（`aux`/`clone`）；② 从 mixed
+   successors 找 dash token，再 `NextTokens(ctx+[dash])` 取选项词，拼成 `-la`/`-ef` 合并候选
+  （tokens=[dash,flag]）。`ls`→`-l/-lh/-la…`、`ps`→`aux/-ef`、`git`→`clone/commit` 一步直达。
+  中文上下文仍 en=false 不变（零回归）。
+- **坑 21（联想提交缺空格）**：`SimeNextCandidateWord::select` 原直接 `commitString(text_)`，
+  `ps`+`aux` 粘成 `psaux`。修复：上一提交词为英文（`isEnglishWord`）且联想词为英文词**或 dash**
+  且词首非空格时提交 `" " + text_`（`ls`+`-`→`ls -`）；dash 后的选项词紧粘（`-`+`la`→`-la`，
+  因 `isEnglishWord("-")=false`）；中文联想与标点仍无空格。最终 `ls -la`、`ps aux`、`ps -ef`。
+- **坑 22（Shift 切英文须交核心，勿插件拦截）**：用户报「Sime 下按 Shift 切了输入法而非纯英文，
+  只有 Rime 的 Shift 切英文」。根因：188 全局配置 `[Hotkey/AltTriggerKeys]=Shift_L` 是 fcitx5
+  **核心层**中英切换（切到键盘布局＝纯英文），Rime 正是靠它。插件原自己拦截 Shift 切内部
+  `ascii_mode_` 与核心打架。**修复**：删除插件 Shift 拦截/`ascii_mode_`/`toggleAsciiMode`，
+  Shift 不消费、交核心 AltTriggerKeys 处理（与 Rime 一致）；Shift+字母仍解析大写键sym 正常上屏。
+  保留 Ctrl+. 中英标点切换（`english_punc_`，中文模式下用）。
+
+### 13.4 四集门禁（部署模型 output-news3-linux vs §12.5 tech 基线）
+
+| 评测集 | 基线 句/字 | linux 句/字 | 差值 |
+|---|---|---|---|
+| cases.1（全拼） | 68.08 / 92.86 | 68.08 / 92.84 | 句持平 |
+| cases.2（全拼） | 43.65 / 85.60 | 43.65 / 85.60 | 完全一致 |
+| cases.num.1（T9） | 53.40 / 86.32 | 53.40 / 86.34 | 句持平 |
+| cases.num.2（T9） | 29.85 / 76.61 | 29.80 / 76.59 | −1 句（噪声级） |
+
+零回归（num.2 仅 1 句波动，1963 中）。命令搭配是稀有专有 bigram，对通用评测几乎无影响。
+
+### 13.5 部署与回滚
+
+- 模型 `/usr/share/sime/sime.cnt`（135,507,986 B），备份 `sime.cnt.bak-tech`（135,490,406 B）。
+- 插件 `/usr/lib/fcitx5/libsime.so`（md5 `cf74b389…`，含 §13.3 合并 dash 选项预测 + 联想空格 + Ctrl+. 中英标点；
+  Shift 中英切换交核心 AltTriggerKeys，见坑 22），备份 `/tmp/libsime.so.bak-en`。
+- **188 / 126** 均已装 + 备份；fcitx5 当前未运行 → 预置。188 需桌面终端 `fcitx5 -r -d` 激活；
+  126 dbus 仍 failed（坑 13），修复后自动加载。**本机不部署**。
+- 回滚：`sudo install -m644 /usr/share/sime/sime.cnt.bak-tech /usr/share/sime/sime.cnt`
+  + 还原 `/tmp/libsime.so.bak-en`，重启 fcitx5。
